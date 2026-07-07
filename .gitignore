@@ -1,0 +1,22 @@
+# Python
+venv/
+__pycache__/
+*.py[cod]
+.Python
+*.egg-info/
+
+# Данные (parquet ~60 MB — не кладём в git, скачивайте отдельно)
+*.parquet
+
+# Airflow runtime
+airflow/logs/
+
+# Секреты
+.env
+.env.*
+!.env.example
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store

@@ -1,0 +1,71 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: main_postgres
+    env_file: ../.env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: main_clickhouse
+    env_file: ../.env
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - ch_data:/var/lib/clickhouse
+    restart: unless-stopped
+
+  superset:
+    image: apache/superset:latest
+    container_name: superset
+    depends_on:
+      - clickhouse
+      - postgres
+    env_file: ../.env
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
+      SUPERSET_LOAD_EXAMPLES: "no"
+      ADMIN_USERNAME: ${SUPERSET_ADMIN_USERNAME}
+      ADMIN_PASSWORD: ${SUPERSET_ADMIN_PASSWORD}
+      ADMIN_EMAIL: ${SUPERSET_ADMIN_EMAIL}
+      PYTHONPATH: /app/superset_home/python-packages
+    ports:
+      - "8088:8088"
+    volumes:
+      - superset_home:/app/superset_home
+      - ./superset/requirements-local.txt:/app/docker/requirements-local.txt:ro
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        mkdir -p /app/superset_home/python-packages
+        pip install --no-cache-dir --target /app/superset_home/python-packages -r /app/docker/requirements-local.txt
+        superset db upgrade
+        superset fab create-admin \
+          --username "$${ADMIN_USERNAME}" \
+          --firstname Admin \
+          --lastname User \
+          --email "$${ADMIN_EMAIL}" \
+          --password "$${ADMIN_PASSWORD}" || true
+        superset init
+        exec /app/docker/entrypoints/run-server.sh
+    restart: unless-stopped
+
+volumes:
+  pg_data:
+  ch_data:
+  superset_home:
