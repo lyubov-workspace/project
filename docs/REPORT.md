@@ -203,7 +203,7 @@ Bar chart по `PULocationID` показывает только цифры (138,
 | Чарт | Тип | Данные |
 |------|-----|--------|
 | Daily Revenue | Line | `taxi_daily_metrics`, `SUM(total_revenue)` по дням |
-| Daily Trips | Line/Bar | `taxi_daily_metrics`, `SUM(total_trips)` по дням |
+| Daily Trips | Bar | `taxi_daily_metrics`, `SUM(total_trips)` по дням |
 | Top 10 Pickup Zones | Bar | SQL-датасет: `fact_taxi_trips` + `taxi_zones` |
 | Payment Type Distribution | Pie | `fact_taxi_trips`, `COUNT(*)` по `payment_type` |
 
