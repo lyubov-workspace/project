@@ -207,11 +207,7 @@ Bar chart по `PULocationID` показывает только цифры (138,
 | Top 10 Pickup Zones | Bar | SQL-датасет: `fact_taxi_trips` + `taxi_zones` |
 | Payment Type Distribution | Pie | `fact_taxi_trips`, `COUNT(*)` по `payment_type` |
 
-### Скриншот
-
 ![Дашборд NYC Taxi — January 2025](images/dashboard.png)
-
-> Чтобы картинка отображалась: сделайте скриншот дашборда в Superset и сохраните как `docs/images/dashboard.png`.
 
 ---
 
