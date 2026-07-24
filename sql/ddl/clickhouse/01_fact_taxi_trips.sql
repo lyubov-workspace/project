@@ -1,4 +1,6 @@
--- Фактовая таблица поездок. Партиционирование по дате подачи (совпадает с DAG transfer_postgres_to_clickhouse).
+-- Фактовая таблица поездок.
+-- PARTITION BY день pickup: совпадает с daily DAG и DROP PARTITION перед вставкой (идемпотентность).
+-- Субпартиции не используются: второй уровень селективности даёт ORDER BY (время + зоны).
 CREATE TABLE IF NOT EXISTS default.fact_taxi_trips
 (
     VendorID            UInt8,

@@ -1,0 +1,12 @@
+<clickhouse>
+    <users>
+        <admin>
+            <named_collection_control>1</named_collection_control>
+            <show_named_collections>1</show_named_collections>
+            <grants>
+                <query>GRANT ALL ON *.* TO admin WITH GRANT OPTION</query>
+                <query>GRANT NAMED COLLECTION ON * TO admin</query>
+            </grants>
+        </admin>
+    </users>
+</clickhouse>

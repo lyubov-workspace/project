@@ -1,4 +1,5 @@
--- Журнал проверок качества данных (заполняется DAG data_quality_checks).
+-- Журнал DQ (DAG data_quality_checks).
+-- Без PARTITION BY: объём маленький (строки проверок, не поездки); фильтры закрывает ORDER BY.
 CREATE TABLE IF NOT EXISTS default.dq_log
 (
     event_time  DateTime,

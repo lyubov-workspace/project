@@ -24,8 +24,13 @@ services:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - ch_data:/var/lib/clickhouse
+      - ./clickhouse/config.d/named_collections.xml:/etc/clickhouse-server/config.d/named_collections.xml:ro
+      - ./clickhouse/users.d/named_collection_grants.xml:/etc/clickhouse-server/users.d/named_collection_grants.xml:ro
     restart: unless-stopped
 
   superset:

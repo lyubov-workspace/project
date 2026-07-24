@@ -8,6 +8,7 @@ from common import get_clickhouse_auth, get_clickhouse_url
 CH_URL = get_clickhouse_url()
 CH_AUTH = get_clickhouse_auth()
 
+
 def run_checks():
     # 1. Отрицательная выручка
     q_neg = "SELECT count() FROM default.taxi_daily_metrics WHERE total_revenue < 0"
@@ -61,13 +62,14 @@ def run_checks():
     if response.status_code != 200:
         raise Exception(f"Clickhouse Error: {response.text}")
 
+
 default_args = {'owner': 'lyubov', 'retries': 1, 'retry_delay': timedelta(minutes=1)}
 
 with DAG(
     dag_id='data_quality_checks',
     default_args=default_args,
     start_date=datetime(2025, 1, 1),
-    schedule_interval=None,
+    schedule_interval='@hourly',
     catchup=False
 ) as dag:
 

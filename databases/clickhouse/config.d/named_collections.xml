@@ -1,0 +1,11 @@
+<clickhouse>
+    <named_collections>
+        <pg_taxi>
+            <host>main_postgres</host>
+            <port>5432</port>
+            <user from_env="POSTGRES_USER"/>
+            <password from_env="POSTGRES_PASSWORD"/>
+            <database from_env="POSTGRES_DB"/>
+        </pg_taxi>
+    </named_collections>
+</clickhouse>

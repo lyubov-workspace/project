@@ -1,6 +1,6 @@
 # NYC Yellow Taxi — pet project
 
-Учебный проект: данные NYC Yellow Taxi за январь 2025 (~3.5 млн поездок).
+Учебный проект: данные NYC Yellow Taxi за 2025 год.
 
 ```
 parquet → Postgres → ClickHouse (Airflow) → Superset
@@ -39,26 +39,31 @@ cd databases && docker compose --env-file ../.env up -d
 cd ../airflow && docker compose --env-file ../.env up -d
 ```
 
-### 3. Таблицы ClickHouse
+### 3. Таблицы
+
+ClickHouse:
 
 ```bash
-source .env
+set -a && source .env && set +a
 for f in sql/ddl/clickhouse/*.sql; do
   docker exec -i main_clickhouse clickhouse-client \
     --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" < "$f"
 done
+python load_taxi_zones.py
 ```
+
+Postgres: DDL в `sql/ddl/postgres/` применяется скриптом загрузки (`--replace` пересоздаёт таблицу).
 
 ### 4. Загрузка данных
 
-Скачать [parquet за январь 2025](https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page) в корень проекта.
-
 ```bash
-source .env
+set -a && source .env && set +a
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 python insert_data_2025.py
 ```
+
+Скрипт скачивает parquet в `data/` и загружает их в Postgres.
 
 ### 5. Airflow
 
@@ -66,14 +71,18 @@ http://localhost:8080 — UI Airflow (учётные данные задаютс
 
 Включить и запустить:
 
+- `transfer_postgres_to_postgres`
 - `transfer_postgres_to_clickhouse`
-- `taxi_metrics_incremental_load` (запускает `data_quality_checks`)
+- `taxi_metrics_incremental_load`
+- `data_quality_checks`
 
 ### 6. Superset
 
 http://localhost:8088 — логин из `.env` (`SUPERSET_ADMIN_*`).
 
 Подключение ClickHouse: host `clickhouse`, port `8123`, database `default`, user/password из `CLICKHOUSE_*` в `.env`.
+
+Креды Postgres для table function в ClickHouse — named collection `pg_taxi` (`databases/clickhouse/config.d/`).
 
 ## После перезагрузки
 
@@ -89,24 +98,29 @@ cd ../airflow && docker compose --env-file ../.env up -d
 ```
 .env.example
 insert_data_2025.py
-requirements.txt
+load_taxi_zones.py
+data/                      — parquet (не в git)
 airflow/dags/              — ETL, метрики, DQ
 databases/                 — Postgres, ClickHouse, Superset
-sql/ddl/clickhouse/        — схема таблиц
+sql/ddl/postgres/          — схема staging
+sql/ddl/clickhouse/        — схема warehouse
+sql/analytics/             — аналитические SQL (скорость и др.)
 sql/optimizations/         — 5 кейсов оптимизации ClickHouse
 taxi_zone_lookup.csv       — справочник зон NYC
+docs/REPORT.md
 ```
 
 ## DAG-и
 
 | DAG | Что делает |
 |-----|------------|
+| `transfer_postgres_to_postgres` | `taxi_db` → `taxi_archive` по дням |
 | `transfer_postgres_to_clickhouse` | Postgres → ClickHouse по дням |
 | `taxi_metrics_incremental_load` | витрина `taxi_daily_metrics` |
-| `data_quality_checks` | проверки качества → `dq_log` |
+| `data_quality_checks` | проверки качества → `dq_log` (`@hourly`) |
 
 ## Примечания
 
-- Два Postgres: `main_postgres` (данные такси) и `airflow-postgres` (служебный, только Airflow).
+- На `main_postgres`: БД `taxi_db` (staging) и `taxi_archive` (копия по дням). Отдельно `airflow-postgres` — только метаданные Airflow.
 - Parquet в git не входит — скачивается отдельно.
 - SQL-скрипты оптимизации (`sql/optimizations/`) запускаются вручную в DBeaver.

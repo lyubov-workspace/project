@@ -1,34 +1,38 @@
 # Отчёт: NYC Yellow Taxi Analytics
 
-**Данные:** NYC Yellow Taxi, январь 2025 (~3.47 млн поездок)
+**Данные:** NYC Yellow Taxi, 2025 (~48.7 млн поездок)
 
 ---
 
 ## 1. Архитектура
 
 ```
-yellow_tripdata_2025-01.parquet
+data/yellow_tripdata_2025-*.parquet
         │
         ▼
 insert_data_2025.py  (pandas + PyArrow + SQLAlchemy)
         │
         ▼
 PostgreSQL (staging)          main_postgres :5432
-  таблица: yellow_taxi_trips
+  БД taxi_db: yellow_taxi_trips
+  БД taxi_archive: yellow_taxi_trips   — копия по дням (DAG PG→PG)
+        │
+        ├─ Airflow: transfer_postgres_to_postgres
         │
         ▼  Airflow DAG: transfer_postgres_to_clickhouse
 ClickHouse (OLAP)             main_clickhouse :8123
   fact_taxi_trips               — сырые поездки
+  taxi_zones                    — справочник зон
   taxi_daily_metrics            — витрина по дням
   dq_log                        — журнал DQ-проверок
         │
         ▼
-Superset :8088                  — дашборд NYC Taxi — January 2025
+Superset :8088                  — дашборд NYC Taxi 2025
 ```
 
 | Компонент | Роль |
 |-----------|------|
-| **PostgreSQL** | staging: первичная загрузка parquet, удобно через pandas |
+| **PostgreSQL** | staging (`taxi_db`) и архивная копия (`taxi_archive`) на одном инстансе |
 | **ClickHouse** | OLAP: быстрые агрегации на миллионах строк (колоночное хранение) |
 | **Airflow** | оркестрация: расписание, цепочка задач, перезапуск без поломки данных |
 | **Superset** | BI: дашборды и графики поверх ClickHouse |
@@ -38,26 +42,33 @@ Superset :8088                  — дашборд NYC Taxi — January 2025
 
 **1. parquet → Postgres** (`insert_data_2025.py`)
 
-- Читает `yellow_tripdata_2025-01.parquet` батчами по 100 000 строк (PyArrow) — не загружает весь файл в память сразу.
-- Пишет в `yellow_taxi_trips` через SQLAlchemy (`to_sql`).
-- Первый батч — `replace` (создаёт таблицу), остальные — `append`.
+- Скачивает parquet TLC в `data/` и читает батчами по 100 000 строк (PyArrow).
+- Таблица `yellow_taxi_trips` по DDL `sql/ddl/postgres/01_yellow_taxi_trips.sql` (типы, месячные партиции, индекс по `tpep_pickup_datetime`); данные — через `COPY`.
 - Креды Postgres берутся из `.env`.
 
-**2. Postgres → ClickHouse** (DAG `transfer_postgres_to_clickhouse`)
+**2. Postgres → Postgres** (DAG `transfer_postgres_to_postgres`)
+
+- Источник: БД `taxi_db`, приёмник: БД `taxi_archive` (тот же `main_postgres`, не метаданные Airflow).
+- За день `ds`: `DELETE` в archive + `COPY` строк с pickup за этот день (только 2025).
+- Повторный run за тот же день не плодит дубли.
+
+**3. Postgres → ClickHouse** (DAG `transfer_postgres_to_clickhouse`)
 
 - `DROP PARTITION` за день — перед загрузкой удаляется партиция за этот день в `fact_taxi_trips`. Если DAG перезапустить, дубликатов не будет (идемпотентность).
-- `INSERT ... SELECT FROM postgresql(...)` — ClickHouse напрямую читает из Postgres через встроенную table function, без промежуточного файла.
-- Фильтр `WHERE toDate(tpep_pickup_datetime) = '{{ ds }}'` — за один запуск DAG грузится ровно один день.
-- Таблица партиционирована по `toYYYYMMDD(tpep_pickup_datetime)` — каждый день января = отдельная партиция на диске.
+- `INSERT ... SELECT FROM postgresql(pg_taxi, table = 'yellow_taxi_trips')` — ClickHouse читает Postgres через named collection `pg_taxi` (креды в `config.d`, не в тексте запроса / `query_log`).
+- Фильтр по дню `toDate(tpep_pickup_datetime) = '{{ ds }}'` и окно pickup ∈ [2025-01-01, 2026-01-01): в ClickHouse не попадают строки с датами вне 2025 (DEFAULT в Postgres).
+- Таблица партиционирована по `toYYYYMMDD(tpep_pickup_datetime)` — дневные партиции; DAG на весь 2025 (`end_date` 2025-12-31).
 
-**3. Витрина метрик** (DAG `taxi_metrics_incremental_load`)
+**4. Витрина метрик** (DAG `taxi_metrics_incremental_load`)
 
 - Смотрит `MAX(report_date)` в `taxi_daily_metrics` и `MAX(toDate(...))` в `fact_taxi_trips`.
 - Если сырые данные «впереди» витрины — догружает до 5 дней за один запуск.
-- Считает `count(*)` и `sum(total_amount)` по дням → `taxi_daily_metrics`.
-- После завершения триггерит DAG проверок качества.
+- Считает `total_trips`, `total_revenue`, `driver_revenue`, а также `median_speed_mph`, `revenue_per_mile`, `revenue_per_minute` (скорость/эффективность — по отфильтрованным поездкам).
+- Перед вставкой удаляет то же окно дат (идемпотентность), затем пишет строки заново.
 
-**4. Data Quality** (DAG `data_quality_checks`)
+**5. Data Quality**
+
+- DAG `data_quality_checks` — по расписанию `@hourly`, результаты в ClickHouse `dq_log`.
 
 | Проверка | Что проверяет |
 |----------|---------------|
@@ -67,21 +78,41 @@ Superset :8088                  — дашборд NYC Taxi — January 2025
 | `zero_trips` | нет дней с нулём поездок |
 | `volume_drop_50_pct` | нет падения объёма >50% день к дню |
 
-Результаты пишутся в `dq_log` (статус `SUCCESS` / `FAIL`).
+- В Postgres на `yellow_taxi_trips`: триггер `trg_yellow_taxi_dq` после `INSERT` вызывает функцию `run_yellow_taxi_dq()` — проверки за последний день pickup, запись в `staging_dq_log` (`sql/ddl/postgres/03_dq_trigger.sql`).
 
-**5. Визуализация** — Superset подключается к ClickHouse и строит чарты на `taxi_daily_metrics`, `fact_taxi_trips` и SQL-датасетах.
+**6. Визуализация** — Superset подключается к ClickHouse и строит чарты на `taxi_daily_metrics`, `fact_taxi_trips` и SQL-датасетах.
 
 ---
 
 ## 2. Решения
 
+### Модель данных: звезда
+
+В ClickHouse:
+
+- **факт** `fact_taxi_trips` — одна строка = одна поездка (меры: расстояние, суммы; ключи зон и типа оплаты);
+- **измерение** `taxi_zones` — атрибуты зоны (`Borough`, `Zone`, `service_zone`) по `LocationID`;
+- витрина `taxi_daily_metrics` — агрегат по дням поверх факта.
+
+**Обоснование выбора схемы.** Снежинка дала бы лишний уровень нормализации (например, borough отдельной таблицей) без выигрыша на объёме справочника. Data Vault усложнил бы модель без выгоды при одном стабильном источнике TLC: история изменений и разделение hub/link/satellite здесь не нужны. Остановились на звезде: `fact_taxi_trips` + `taxi_zones`.
+
 ### Postgres как staging, ClickHouse как warehouse
 
-Postgres хорош для «положить сырые данные» (pandas, транзакции, простой `to_sql`). ClickHouse — для аналитики: `GROUP BY` на 3.5M строк выполняется быстро за счёт колоночного формата и партиций. Это типичная схема landing → warehouse, а не «всё сразу в ClickHouse».
+Postgres хорош для «положить сырые данные» (pandas, транзакции, `COPY`). ClickHouse — для аналитики: `GROUP BY` на десятках миллионов строк выполняется быстро за счёт колоночного формата и партиций. Это типичная схема landing → warehouse, а не «всё сразу в ClickHouse».
 
 ### Идемпотентность ETL
 
 Без `DROP PARTITION` повторный запуск DAG за тот же день добавил бы строки второй раз. Схема «удалить партицию → вставить заново» даёт тот же результат, что и один успешный прогон.
+
+### Партиционирование в ClickHouse
+
+| Таблица | Партиции | Зачем так |
+|--------|----------|-----------|
+| `fact_taxi_trips` | день pickup (`toYYYYMMDD`) | daily ETL: `DROP PARTITION` + insert за `ds`; в запросах за день читается нужная партиция |
+| `taxi_daily_metrics` | нет | ~одна строка на день (~365/год) — отдельный кусок на диске не окупается |
+| `dq_log` | нет | журнал проверок, небольшой объём; доступ по `ORDER BY (event_time, check_name)` |
+
+Отдельное субпартиционирование (партиция внутри партиции) не делали: в ClickHouse его нет как в Postgres; нужная селективность внутри дня у факта достигается ключом сортировки `ORDER BY (tpep_pickup_datetime, PULocationID, DOLocationID)`.
 
 ### Инкрементальная витрина вместо полного пересчёта
 
@@ -89,16 +120,16 @@ Postgres хорош для «положить сырые данные» (pandas,
 
 ### DDL в репозитории
 
-Таблицы ClickHouse описаны в `sql/ddl/clickhouse/` — проект можно развернуть с нуля, не восстанавливая схему из памяти или DBeaver.
+Схемы описаны в `sql/ddl/postgres/` и `sql/ddl/clickhouse/` — проект можно развернуть с нуля, не восстанавливая таблицы из памяти или DBeaver.
 
 ### Секреты в `.env`
 
 Пароли и ключи — в `.env` (не в git). В репозитории только `.env.example` с заглушками `change_me`. DAG-и и `insert_data_2025.py` читают креды из переменных окружения.
 
-### Docker: два Postgres
+### Docker: Postgres
 
-- `main_postgres` — данные такси (`yellow_taxi_trips`).
-- `airflow-postgres` — служебная БД Airflow (расписание, история запусков).
+- `main_postgres` — данные такси: БД `taxi_db` (staging) и `taxi_archive` (дневные копии).
+- `airflow-postgres` — служебная БД Airflow (расписание, история запусков), не приёмник ETL.
 
 Сервис Airflow Postgres переименован в `airflow-postgres`, чтобы в общей Docker-сети `databases_default` не было конфликта DNS-имени `postgres`.
 
@@ -123,12 +154,12 @@ Bar chart по `PULocationID` показывает только цифры (138,
 **Файл:** `01_skip_index.sql`  
 **Задача:** найти редкие поездки `PULocationID = 206`.
 
-- **До:** full scan — ClickHouse читает все гранулы таблицы.
-- **После:** `ADD INDEX ... TYPE bloom_filter()` + `MATERIALIZE INDEX` — для каждой гранулы хранится «есть ли здесь 206», лишние гранулы пропускаются.
+- **До:** без skip index ClickHouse перебирает все гранулы партиций, попавших в запрос (по `EXPLAIN ESTIMATE` — 31 mark / 253 952 rows).
+- **После:** `ADD INDEX ... TYPE bloom_filter()` + `MATERIALIZE INDEX` — для каждой гранулы хранится «есть ли здесь 206», лишние гранулы пропускаются (7 marks / 57 344 rows).
 
 | | До | После |
 |---|-----|-------|
-| Метод | full scan | bloom-filter skip index |
+| Метод | без skip index | bloom-filter skip index |
 | Партиций (parts) | 31 | 7 |
 | Строк к чтению (rows) | 253 952 | 57 344 |
 | Гранул (marks) | 31 | 7 |
@@ -198,23 +229,36 @@ Bar chart по `PULocationID` показывает только цифры (138,
 
 ## 4. Дашборд
 
-**Название:** `NYC Taxi — January 2025`
+**Название:** `NYC Taxi 2025`
 
 | Чарт | Тип | Данные |
 |------|-----|--------|
 | Daily Revenue | Line | `taxi_daily_metrics`, `SUM(total_revenue)` по дням |
-| Daily Trips | Bar | `taxi_daily_metrics`, `SUM(total_trips)` по дням |
+| Daily Driver Revenue | Line | `taxi_daily_metrics`, `SUM(driver_revenue)` по дням |
+| Daily Trips | Line/Bar | `taxi_daily_metrics`, `SUM(total_trips)` по дням |
+| Daily Median Speed (mph) | Line | `taxi_daily_metrics`, `AVG(median_speed_mph)` по дням |
 | Top 10 Pickup Zones | Bar | SQL-датасет: `fact_taxi_trips` + `taxi_zones` |
 | Payment Type Distribution | Pie | `fact_taxi_trips`, `COUNT(*)` по `payment_type` |
 
-![Дашборд NYC Taxi — January 2025](images/dashboard.png)
+### Скриншоты
+
+![Метрики по дням](images/dashboard_metrics.png)
+
+![Оплата и зоны pickup](images/dashboard_zones.png)
 
 ---
 
 ## 5. Инсайты
 
-1. **Объём** — ~3.47 млн поездок за январь 2025.
-2. **География** — в топе JFK Airport, Midtown Center, Times Square: аэропорты и центр Manhattan.
-3. **Оплата** — основная доля у карт (`payment_type = 1`).
-4. **Качество источника** — ~15% записей с `payment_type = 0`: в справочнике TLC такого типа нет, это пропуски в сырых данных.
-5. **DQ** — все проверки в `dq_log` завершились со статусом `SUCCESS`.
+Метрика **доход водителя** = `fare_amount + tip_amount`.
+
+1. **Объём** — ~48.4 млн поездок за 2025.
+2. **Доход vs чек** — сумма `total_amount` ≈ $1.30 млрд, доход водителей ≈ $1.03 млрд (~79% чека). Tip rate (чаевые к fare) ≈ **15.4%** за год.
+3. **Сезонность** — пик driver_revenue в мае–июне и снова осенью; декабрь даёт максимальный средний чек водителя (~$25 за поездку против ~$20–22 в остальные месяцы).
+4. **Дни недели** — средний доход водителя выше в будни (пн ~$22.1), ниже в субботу (~$19.9); tip rate выше в начале недели (~16%), ниже в вс (~13.9%).
+5. **География pickup** — по сумме дохода лидируют JFK и LaGuardia (высокий средний чек ~$65 и ~$52), далее центр Manhattan (Midtown, Upper East Side, Times Square) с большим числом поездок, но меньшим средним чеком.
+6. **Скорость** — медиана ~9.5 mph за год; днём (примерно 11–17) медиана падает до ~8–8.5 mph, ночью и рано утром выше (~12–17 mph) — типичные пробки Manhattan vs более свободные часы.
+7. **Эффективность** — в среднем ~$8.9 дохода водителя на милю и ~$1.35 на минуту поездки; в декабре выручка на милю заметно выше (~$10.6), при сопоставимой медиане скорости.
+8. **Оплата** — основная доля у карт (`payment_type = 1`); в сырье есть `payment_type = 0` вне справочника TLC (пропуски/шум).
+
+Запросы к скорости/эффективности: `sql/analytics/01_speed_efficiency.sql`.
